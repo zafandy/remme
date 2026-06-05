@@ -160,26 +160,42 @@ async def _build_f1_text() -> str:
     if not upcoming:
         return "No upcoming F1 sessions cached.\nTap <b>Refresh data</b> to update."
 
-    # Group by GP name (stored in description)
     groups: dict[str, list] = defaultdict(list)
     for ev in upcoming:
-        gp = ev.get("description") or "Unknown GP"
-        groups[gp].append(ev)
+        groups[ev.get("description") or "Unknown GP"].append(ev)
 
-    # Sort GPs by first session, show next 3 weekends
-    sorted_groups = sorted(groups.items(), key=lambda g: g[1][0].get("event_at") or "")[:3]
+    sorted_groups = sorted(groups.items(), key=lambda g: g[1][0].get("event_at") or "")[:5]
 
     parts = [_h("FORMULA 1") + "\n"]
-    for gp_name, sessions in sorted_groups:
-        parts.append(f"<b>{_e(gp_name)}</b>")
-        for s in sessions:
-            title = s.get("title", "")
-            label = title.split(" — ", 1)[1] if " — " in title else title
-            date_str = _e(_fmt_dt(s.get("event_at"), tz))
-            parts.append(f"  {_e(label)}: {date_str}")
-        parts.append("")
+    sep = "─" * 34
 
-    return "\n".join(parts).rstrip()
+    for i, (gp_name, sessions) in enumerate(sorted_groups):
+        if i > 0:
+            parts.append(sep)
+        parts.append(f"<b>{_e(gp_name)}</b>")
+
+        rows: list[str] = []
+        for s in sessions:
+            raw_title = s.get("title", "")
+            label = raw_title.split(" — ", 1)[1] if " — " in raw_title else raw_title
+            event_at = s.get("event_at")
+            if event_at:
+                try:
+                    dt = datetime.fromisoformat(event_at)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    dt_local = dt.astimezone(tz)
+                    date_col = dt_local.strftime("%a %d %b")
+                    time_col = dt_local.strftime("%H:%M")
+                except (ValueError, TypeError):
+                    date_col = time_col = "TBD"
+            else:
+                date_col = time_col = "TBD"
+            rows.append(f"{label:<16}{date_col:<13}{time_col}")
+
+        parts.append("<pre>" + "\n".join(rows) + "</pre>")
+
+    return "\n".join(parts)
 
 
 async def _build_music_text() -> str:

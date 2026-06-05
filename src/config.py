@@ -48,7 +48,7 @@ DB_PATH: str = _optional("DB_PATH", "data/remme.db")
 # ---------------------------------------------------------------------------
 # Barcelona
 # ---------------------------------------------------------------------------
-BARCELONA_TEAM_ID: str = _optional("BARCELONA_TEAM_ID", "133604")
+BARCELONA_TEAM_ID: str = _optional("BARCELONA_TEAM_ID", "133739")
 
 # ---------------------------------------------------------------------------
 # Logging

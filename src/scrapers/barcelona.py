@@ -9,7 +9,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 _THESPORTSDB_URL = "https://www.thesportsdb.com/api/v1/json/3/eventsnext.php"
-_DEFAULT_TEAM_ID = "133604"   # FC Barcelona
+_DEFAULT_TEAM_ID = "133739"   # FC Barcelona
 
 
 async def fetch_barcelona_matches(team_id: str = _DEFAULT_TEAM_ID) -> list[dict[str, Any]]:
@@ -44,6 +44,11 @@ async def fetch_barcelona_matches(team_id: str = _DEFAULT_TEAM_ID) -> list[dict[
         away = ev.get("strAwayTeam") or ""
         league = ev.get("strLeague") or ""
         event_id = ev.get("idEvent") or ""
+
+        # Guard: skip if neither team is Barcelona (misconfigured team ID safety net)
+        if "barcelona" not in home.lower() and "barcelona" not in away.lower():
+            logger.debug("Skipping non-Barcelona match: %s vs %s", home, away)
+            continue
 
         events.append({
             "title": f"{home} vs {away}",
