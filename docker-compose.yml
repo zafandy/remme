@@ -1,0 +1,9 @@
+services:
+  remme:
+    build: .
+    container_name: remme
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    # No ports needed — polling bot
