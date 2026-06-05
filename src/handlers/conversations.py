@@ -1,11 +1,13 @@
 """ConversationHandler for interactive /add command."""
 
+import html
 import logging
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ParseMode
 from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
@@ -45,19 +47,28 @@ _KEY = "add_data"
 # Entry point: /add
 # ---------------------------------------------------------------------------
 
-async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    keyboard = [
+def _type_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("Birthday", callback_data="type_birthday"),
             InlineKeyboardButton("Reminder", callback_data="type_reminder"),
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        "What would you like to add?",
-        reply_markup=reply_markup,
-    )
+        ],
+        [InlineKeyboardButton("← Cancel", callback_data="add_cancel")],
+    ])
+
+
+async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data[_KEY] = {}
+    await update.message.reply_text("What would you like to add?", reply_markup=_type_keyboard())
+    return CHOOSING_TYPE
+
+
+async def cmd_add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Entry point when the user taps '+ Add' from the inline menu."""
+    query = update.callback_query
+    await query.answer()
+    context.user_data[_KEY] = {}
+    await query.edit_message_text("What would you like to add?", reply_markup=_type_keyboard())
     return CHOOSING_TYPE
 
 
@@ -68,14 +79,18 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def choose_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-    data = query.data
+
+    if query.data == "add_cancel":
+        await query.edit_message_text("Cancelled.")
+        context.user_data.pop(_KEY, None)
+        return ConversationHandler.END
 
     context.user_data[_KEY] = {}
 
-    if data == "type_birthday":
+    if query.data == "type_birthday":
         await query.edit_message_text("Enter the person's name:")
         return BD_NAME
-    elif data == "type_reminder":
+    elif query.data == "type_reminder":
         await query.edit_message_text("What should I remind you about?")
         return REM_TITLE
     else:
@@ -125,20 +140,17 @@ async def bd_notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     month = data["month"]
     day = data["day"]
 
+    from src.handlers.commands import _main_menu_keyboard
     try:
         bday_id = await db.add_birthday(
-            config.DB_PATH,
-            name=name,
-            month=month,
-            day=day,
-            notes=notes,
+            config.DB_PATH, name=name, month=month, day=day, notes=notes,
         )
-        await update.message.reply_text(
+        text = (
             f"Birthday saved! [ID: {bday_id}]\n"
-            f"*{name}* — {day:02d}.{month:02d}"
-            + (f"\nNotes: {notes}" if notes else ""),
-            parse_mode="Markdown",
+            f"<b>{html.escape(name)}</b> — {day:02d}.{month:02d}"
+            + (f"\nNotes: {html.escape(notes)}" if notes else "")
         )
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=_main_menu_keyboard())
     except Exception as exc:  # noqa: BLE001
         logger.error("Failed to save birthday: %s", exc)
         await update.message.reply_text("Failed to save birthday. Please try again.")
@@ -237,12 +249,14 @@ async def rem_recurring(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         except Exception:  # noqa: BLE001
             date_str = remind_at
 
+        from src.handlers.commands import _main_menu_keyboard
         rec_str = f" (recurring: {recurring})" if recurring else ""
         await query.edit_message_text(
             f"Reminder saved! [ID: {rem_id}]\n"
-            f"*{title}*\n"
-            f"{date_str}{rec_str}",
-            parse_mode="Markdown",
+            f"<b>{html.escape(title)}</b>\n"
+            f"{html.escape(date_str)}{html.escape(rec_str)}",
+            parse_mode=ParseMode.HTML,
+            reply_markup=_main_menu_keyboard(),
         )
     except Exception as exc:  # noqa: BLE001
         logger.error("Failed to save reminder: %s", exc)
@@ -375,10 +389,13 @@ def _parse_reminder_datetime(text: str) -> Optional[datetime]:
 
 def add_conversation_handler() -> ConversationHandler:
     return ConversationHandler(
-        entry_points=[CommandHandler("add", cmd_add)],
+        entry_points=[
+            CommandHandler("add", cmd_add),
+            CallbackQueryHandler(cmd_add_callback, pattern="^add_item$"),
+        ],
         states={
             CHOOSING_TYPE: [
-                CallbackQueryHandler(choose_type, pattern=r"^type_"),
+                CallbackQueryHandler(choose_type, pattern=r"^(type_|add_cancel)"),
             ],
             BD_NAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, bd_name),

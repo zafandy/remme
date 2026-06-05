@@ -1,10 +1,12 @@
-"""All bot command handlers."""
+"""All bot command handlers — supports both slash commands and inline button callbacks."""
 
+import html
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from src import config
@@ -12,15 +14,14 @@ from src import database as db
 
 logger = logging.getLogger(__name__)
 
+DATE_FMT = "%a, %d %b %Y at %H:%M"
+
+
 # ---------------------------------------------------------------------------
 # Formatting helpers
 # ---------------------------------------------------------------------------
 
-DATE_FMT = "%a, %d %b %Y at %H:%M"
-
-
 def _fmt_dt(iso_str: Optional[str], tz=None) -> str:
-    """Format an ISO datetime string for display."""
     if not iso_str:
         return "TBD"
     try:
@@ -34,207 +35,83 @@ def _fmt_dt(iso_str: Optional[str], tz=None) -> str:
         return iso_str
 
 
-def _escape_md(text: str) -> str:
-    """Escape special Markdown characters (v1 / legacy mode)."""
-    # Only escape characters that break Markdown v1 formatting
-    for ch in ("_", "*", "`", "["):
-        text = text.replace(ch, f"\\{ch}")
-    return text
+def _e(text: str) -> str:
+    """HTML-escape external or user-provided content."""
+    return html.escape(str(text))
 
 
 def _divider() -> str:
     return "─" * 28
 
 
-def _section_header(label: str) -> str:
-    return f"*[ {label} ]*"
+def _h(label: str) -> str:
+    return f"<b>[ {label} ]</b>"
 
 
 # ---------------------------------------------------------------------------
-# /start
+# Keyboards
+# ---------------------------------------------------------------------------
+
+def _main_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Upcoming (7 days)", callback_data="upcoming"),
+            InlineKeyboardButton("Today", callback_data="today"),
+        ],
+        [
+            InlineKeyboardButton("CS2", callback_data="cs2"),
+            InlineKeyboardButton("Formula 1", callback_data="f1"),
+        ],
+        [
+            InlineKeyboardButton("Music", callback_data="music"),
+            InlineKeyboardButton("Birthdays", callback_data="birthdays"),
+        ],
+        [
+            InlineKeyboardButton("Reminders", callback_data="reminders"),
+            InlineKeyboardButton("Refresh data", callback_data="refresh"),
+        ],
+        [
+            InlineKeyboardButton("+ Add", callback_data="add_item"),
+        ],
+    ])
+
+
+def _back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("← Menu", callback_data="menu")]
+    ])
+
+
+# ---------------------------------------------------------------------------
+# Unified reply helper — works for both /commands and button taps
+# ---------------------------------------------------------------------------
+
+async def _reply(
+    update: Update,
+    text: str,
+    keyboard: Optional[InlineKeyboardMarkup] = None,
+) -> None:
+    query = update.callback_query
+    if query:
+        await query.answer()
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    else:
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+
+# ---------------------------------------------------------------------------
+# /start + menu callback
 # ---------------------------------------------------------------------------
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = (
-        "*remme* — your personal reminder bot\n\n"
-        "Commands:\n"
-        "/upcoming — events in the next 7 days\n"
-        "/today — events today\n"
-        "/cs2 — upcoming NaVi matches\n"
-        "/f1 — upcoming F1 races\n"
-        "/music — latest Hajime releases\n"
-        "/birthdays — birthday list\n"
-        "/reminders — active reminders\n"
-        "/add — add a birthday or reminder\n"
-        "/delete <id> — delete a reminder or birthday\n"
-        "/refresh — force-refresh scraped data\n"
-    )
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await _reply(update, "<b>remme</b> — your personal reminder bot", keyboard=_main_menu_keyboard())
 
 
 # ---------------------------------------------------------------------------
-# /upcoming
+# Content builders (pure async functions, no Update dependency)
 # ---------------------------------------------------------------------------
 
-async def build_upcoming_message(days: int = 7, include_past_today: bool = False) -> str:
-    """Build a formatted message of events in the next `days` days."""
-    tz = config.TIMEZONE
-    now = datetime.now(timezone.utc)
-    now_local = datetime.now(tz)
-    cutoff = now + timedelta(days=days)
-
-    sections: list[str] = []
-
-    # --- CS2 ---
-    cs2_events = await db.get_cache_events(config.DB_PATH, "cs2")
-    cs2_lines: list[str] = []
-    for ev in cs2_events:
-        if ev.get("event_at"):
-            try:
-                dt = datetime.fromisoformat(ev["event_at"])
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                if dt < now or dt > cutoff:
-                    continue
-            except ValueError:
-                pass
-        title = ev.get("title", "Unknown match")
-        date_str = _fmt_dt(ev.get("event_at"), tz)
-        url = ev.get("url") or ""
-        line = f"- {title}\n  {date_str}"
-        if url:
-            line += f"\n  {url}"
-        cs2_lines.append(line)
-
-    if cs2_lines:
-        block = _section_header("CS2") + "\n" + "\n\n".join(cs2_lines)
-        sections.append(block)
-
-    # --- F1 ---
-    f1_events = await db.get_cache_events(config.DB_PATH, "f1")
-    f1_lines: list[str] = []
-    for ev in f1_events:
-        if ev.get("event_at"):
-            try:
-                dt = datetime.fromisoformat(ev["event_at"])
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                if dt < now or dt > cutoff:
-                    continue
-            except ValueError:
-                pass
-        title = ev.get("title", "Unknown race")
-        desc = ev.get("description") or ""
-        date_str = _fmt_dt(ev.get("event_at"), tz)
-        line = f"- {title}"
-        if desc:
-            line += f" ({desc})"
-        line += f"\n  {date_str}"
-        f1_lines.append(line)
-
-    if f1_lines:
-        block = _section_header("FORMULA 1") + "\n" + "\n\n".join(f1_lines)
-        sections.append(block)
-
-    # --- Birthdays ---
-    today_local = now_local.date()
-    bday_lines: list[str] = []
-    birthdays = await db.get_birthdays(config.DB_PATH)
-    for bday in birthdays:
-        month = bday["month"]
-        day = bday["day"]
-        name = bday["name"]
-        notes = bday.get("notes") or ""
-        try:
-            this_year_bday = today_local.replace(month=month, day=day)
-        except ValueError:
-            continue
-        delta = (this_year_bday - today_local).days
-        if delta < 0:
-            try:
-                next_year_bday = this_year_bday.replace(year=today_local.year + 1)
-                delta = (next_year_bday - today_local).days
-                bday_date = next_year_bday
-            except ValueError:
-                continue
-        else:
-            bday_date = this_year_bday
-
-        if 0 <= delta <= days:
-            if delta == 0:
-                label = "today!"
-            elif delta == 1:
-                label = "tomorrow"
-            else:
-                label = f"in {delta} days"
-            line = f"- *{name}* — {bday_date.strftime('%d %b')} ({label})"
-            if notes:
-                line += f"\n  _{notes}_"
-            bday_lines.append(line)
-
-    if bday_lines:
-        block = _section_header("BIRTHDAYS") + "\n" + "\n".join(bday_lines)
-        sections.append(block)
-
-    # --- Custom Reminders ---
-    reminder_lines: list[str] = []
-    reminders = await db.get_active_reminders(config.DB_PATH)
-    for rem in reminders:
-        try:
-            rem_dt = datetime.fromisoformat(rem["remind_at"])
-            if rem_dt.tzinfo is None:
-                rem_dt = rem_dt.replace(tzinfo=timezone.utc)
-            if rem_dt < now or rem_dt > cutoff:
-                continue
-        except (ValueError, TypeError):
-            continue
-        title = rem["title"]
-        notes = rem.get("notes") or ""
-        recurring = rem.get("recurring") or ""
-        date_str = _fmt_dt(rem["remind_at"], tz)
-        line = f"- *{title}*\n  {date_str}"
-        if recurring:
-            line += f" (recurring: {recurring})"
-        if notes:
-            line += f"\n  _{notes}_"
-        reminder_lines.append(line)
-
-    if reminder_lines:
-        block = _section_header("REMINDERS") + "\n" + "\n\n".join(reminder_lines)
-        sections.append(block)
-
-    if not sections:
-        return ""
-
-    divider = f"\n{_divider()}\n"
-    return divider.join(sections)
-
-
-async def cmd_upcoming(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = await build_upcoming_message(days=7)
-    if not text.strip():
-        await update.message.reply_text("No events in the next 7 days.")
-        return
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-
-# ---------------------------------------------------------------------------
-# /today
-# ---------------------------------------------------------------------------
-
-async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = await build_upcoming_message(days=0)
-    if not text.strip():
-        await update.message.reply_text("Nothing scheduled for today.")
-        return
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-
-# ---------------------------------------------------------------------------
-# /cs2
-# ---------------------------------------------------------------------------
-
-async def cmd_cs2(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _build_cs2_text() -> str:
     tz = config.TIMEZONE
     events = await db.get_cache_events(config.DB_PATH, "cs2")
     now = datetime.now(timezone.utc)
@@ -253,221 +130,309 @@ async def cmd_cs2(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         upcoming.append(ev)
 
     if not upcoming:
-        await update.message.reply_text(
-            "No upcoming NaVi matches cached. Try /refresh to update.",
-        )
-        return
+        return "No upcoming NaVi matches cached.\nTap <b>Refresh data</b> to update."
 
-    lines = [_section_header("CS2") + " — NaVi upcoming matches\n"]
+    lines = [_h("CS2") + " — NaVi upcoming matches\n"]
     for ev in upcoming:
-        title = ev.get("title", "Unknown match")
-        date_str = _fmt_dt(ev.get("event_at"), tz)
+        title = _e(ev.get("title", "Unknown match"))
+        date_str = _e(_fmt_dt(ev.get("event_at"), tz))
         url = ev.get("url") or ""
         line = f"- {title}\n  {date_str}"
         if url:
-            line += f"\n  {url}"
+            line += f"\n  {_e(url)}"
         lines.append(line)
 
-    await update.message.reply_text("\n\n".join(lines), parse_mode="Markdown")
+    return "\n\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# /f1
-# ---------------------------------------------------------------------------
-
-async def cmd_f1(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _build_f1_text() -> str:
     tz = config.TIMEZONE
     events = await db.get_cache_events(config.DB_PATH, "f1")
     now = datetime.now(timezone.utc)
 
-    upcoming = []
-    for ev in events:
-        if ev.get("event_at"):
-            try:
-                dt = datetime.fromisoformat(ev["event_at"])
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                if dt < now:
-                    continue
-            except ValueError:
-                pass
-        upcoming.append(ev)
-
-    # Show next 3 races
-    upcoming = upcoming[:3]
+    upcoming = [
+        ev for ev in events
+        if not ev.get("event_at") or _is_future(ev["event_at"], now)
+    ][:5]
 
     if not upcoming:
-        await update.message.reply_text(
-            "No upcoming F1 races cached. Try /refresh to update.",
-        )
-        return
+        return "No upcoming F1 races cached.\nTap <b>Refresh data</b> to update."
 
-    lines = [_section_header("FORMULA 1") + " — next races\n"]
+    lines = [_h("FORMULA 1") + " — next races\n"]
     for ev in upcoming:
-        title = ev.get("title", "Unknown race")
-        desc = ev.get("description") or ""
-        date_str = _fmt_dt(ev.get("event_at"), tz)
-        url = ev.get("url") or ""
-        line = f"- *{title}*"
+        title = _e(ev.get("title", "Unknown race"))
+        desc = _e(ev.get("description") or "")
+        date_str = _e(_fmt_dt(ev.get("event_at"), tz))
+        line = f"- <b>{title}</b>"
         if desc:
             line += f"\n  {desc}"
         line += f"\n  {date_str}"
-        if url:
-            line += f"\n  {url}"
         lines.append(line)
 
-    await update.message.reply_text("\n\n".join(lines), parse_mode="Markdown")
+    return "\n\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# /music
-# ---------------------------------------------------------------------------
-
-async def cmd_music(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _build_music_text() -> str:
     tz = config.TIMEZONE
     events = await db.get_cache_events(config.DB_PATH, "hajime")
 
     if not events:
-        await update.message.reply_text(
-            "No Hajime releases cached. Try /refresh to update.",
-        )
-        return
+        return "No Hajime releases cached.\nTap <b>Refresh data</b> to update."
 
-    # Latest 5, most recent first
-    sorted_events = sorted(
-        events,
-        key=lambda e: e.get("event_at") or "",
-        reverse=True,
-    )[:5]
+    sorted_events = sorted(events, key=lambda e: e.get("event_at") or "", reverse=True)[:5]
 
-    lines = [_section_header("MUSIC") + " — latest Hajime releases\n"]
+    lines = [_h("MUSIC") + " — latest Hajime releases\n"]
     for ev in sorted_events:
-        title = ev.get("title", "Unknown release")
-        date_str = _fmt_dt(ev.get("event_at"), tz)
+        title = _e(ev.get("title", "Unknown release"))
+        date_str = _e(_fmt_dt(ev.get("event_at"), tz))
         url = ev.get("url") or ""
-        line = f"- *{title}*\n  {date_str}"
+        line = f"- <b>{title}</b>\n  {date_str}"
         if url:
-            line += f"\n  {url}"
+            line += f"\n  {_e(url)}"
         lines.append(line)
 
-    await update.message.reply_text("\n\n".join(lines), parse_mode="Markdown")
+    return "\n\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# /birthdays
-# ---------------------------------------------------------------------------
-
-async def cmd_birthdays(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _build_birthdays_text() -> str:
     birthdays = await db.get_birthdays(config.DB_PATH)
     if not birthdays:
-        await update.message.reply_text("No birthdays saved. Use /add to add one.")
-        return
+        return "No birthdays saved.\nTap <b>+ Add</b> to add one."
 
     tz = config.TIMEZONE
     today_local = datetime.now(tz).date()
 
-    lines = [_section_header("BIRTHDAYS") + "\n"]
+    lines = [_h("BIRTHDAYS") + "\n"]
     for bday in birthdays:
-        month = bday["month"]
-        day = bday["day"]
-        name = bday["name"]
+        month, day = bday["month"], bday["day"]
+        name = _e(bday["name"])
         notes = bday.get("notes") or ""
         bday_id = bday["id"]
 
-        date_label = f"{day:02d}.{month:02d}"
         try:
-            this_year_bday = today_local.replace(month=month, day=day)
-            delta = (this_year_bday - today_local).days
+            this_year = today_local.replace(month=month, day=day)
+            delta = (this_year - today_local).days
             if delta < 0:
-                next_year_bday = this_year_bday.replace(year=today_local.year + 1)
-                delta = (next_year_bday - today_local).days
+                delta = (this_year.replace(year=today_local.year + 1) - today_local).days
         except ValueError:
             delta = -1
 
         if delta == 0:
-            upcoming = " — today!"
+            annotation = " — today!"
         elif delta > 0:
-            upcoming = f" — in {delta} days"
+            annotation = f" — in {delta} days"
         else:
-            upcoming = ""
+            annotation = ""
 
-        line = f"[{bday_id}] *{name}* ({date_label}){upcoming}"
+        line = f"[{bday_id}] <b>{name}</b> ({day:02d}.{month:02d}){_e(annotation)}"
         if notes:
-            line += f"\n  _{notes}_"
+            line += f"\n  <i>{_e(notes)}</i>"
         lines.append(line)
 
-    await update.message.reply_text("\n\n".join(lines), parse_mode="Markdown")
+    return "\n\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# /reminders
-# ---------------------------------------------------------------------------
-
-async def cmd_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _build_reminders_text() -> str:
     reminders = await db.get_active_reminders(config.DB_PATH)
     if not reminders:
-        await update.message.reply_text("No active reminders. Use /add to create one.")
-        return
+        return "No active reminders.\nTap <b>+ Add</b> to create one."
 
     tz = config.TIMEZONE
-    lines = [_section_header("REMINDERS") + "\n"]
+    lines = [_h("REMINDERS") + "\n"]
     for rem in reminders:
-        rem_id = rem["id"]
-        title = rem["title"]
+        title = _e(rem["title"])
         notes = rem.get("notes") or ""
         recurring = rem.get("recurring") or ""
-        date_str = _fmt_dt(rem["remind_at"], tz)
+        date_str = _e(_fmt_dt(rem["remind_at"], tz))
 
-        line = f"[{rem_id}] *{title}*\n  {date_str}"
+        line = f"[{rem['id']}] <b>{title}</b>\n  {date_str}"
         if recurring:
             line += f" (recurring: {recurring})"
         if notes:
-            line += f"\n  _{notes}_"
+            line += f"\n  <i>{_e(notes)}</i>"
         lines.append(line)
 
-    await update.message.reply_text("\n\n".join(lines), parse_mode="Markdown")
+    return "\n\n".join(lines)
+
+
+async def build_upcoming_message(days: int = 7) -> str:
+    tz = config.TIMEZONE
+    now = datetime.now(timezone.utc)
+    now_local = datetime.now(tz)
+    cutoff = now + timedelta(days=days)
+    sections: list[str] = []
+
+    # CS2
+    cs2_lines: list[str] = []
+    for ev in await db.get_cache_events(config.DB_PATH, "cs2"):
+        if ev.get("event_at") and not _in_window(ev["event_at"], now, cutoff):
+            continue
+        title = _e(ev.get("title", "Unknown match"))
+        date_str = _e(_fmt_dt(ev.get("event_at"), tz))
+        url = ev.get("url") or ""
+        line = f"- {title}\n  {date_str}"
+        if url:
+            line += f"\n  {_e(url)}"
+        cs2_lines.append(line)
+    if cs2_lines:
+        sections.append(_h("CS2") + "\n" + "\n\n".join(cs2_lines))
+
+    # F1
+    f1_lines: list[str] = []
+    for ev in await db.get_cache_events(config.DB_PATH, "f1"):
+        if ev.get("event_at") and not _in_window(ev["event_at"], now, cutoff):
+            continue
+        title = _e(ev.get("title", "Unknown race"))
+        desc = _e(ev.get("description") or "")
+        date_str = _e(_fmt_dt(ev.get("event_at"), tz))
+        line = f"- {title}"
+        if desc:
+            line += f" ({desc})"
+        line += f"\n  {date_str}"
+        f1_lines.append(line)
+    if f1_lines:
+        sections.append(_h("FORMULA 1") + "\n" + "\n\n".join(f1_lines))
+
+    # Birthdays
+    today_local = now_local.date()
+    bday_lines: list[str] = []
+    for bday in await db.get_birthdays(config.DB_PATH):
+        month, day = bday["month"], bday["day"]
+        name = _e(bday["name"])
+        notes = bday.get("notes") or ""
+        try:
+            this_year = today_local.replace(month=month, day=day)
+            delta = (this_year - today_local).days
+            if delta < 0:
+                delta = (this_year.replace(year=today_local.year + 1) - today_local).days
+        except ValueError:
+            continue
+        if not (0 <= delta <= days):
+            continue
+        label = "today!" if delta == 0 else ("tomorrow" if delta == 1 else f"in {delta} days")
+        line = f"- <b>{name}</b> — {this_year.strftime('%d %b')} ({label})"
+        if notes:
+            line += f"\n  <i>{_e(notes)}</i>"
+        bday_lines.append(line)
+    if bday_lines:
+        sections.append(_h("BIRTHDAYS") + "\n" + "\n".join(bday_lines))
+
+    # Reminders
+    rem_lines: list[str] = []
+    for rem in await db.get_active_reminders(config.DB_PATH):
+        try:
+            rem_dt = datetime.fromisoformat(rem["remind_at"])
+            if rem_dt.tzinfo is None:
+                rem_dt = rem_dt.replace(tzinfo=timezone.utc)
+            if not (now <= rem_dt <= cutoff):
+                continue
+        except (ValueError, TypeError):
+            continue
+        title = _e(rem["title"])
+        notes = rem.get("notes") or ""
+        recurring = rem.get("recurring") or ""
+        date_str = _e(_fmt_dt(rem["remind_at"], tz))
+        line = f"- <b>{title}</b>\n  {date_str}"
+        if recurring:
+            line += f" (recurring: {recurring})"
+        if notes:
+            line += f"\n  <i>{_e(notes)}</i>"
+        rem_lines.append(line)
+    if rem_lines:
+        sections.append(_h("REMINDERS") + "\n" + "\n\n".join(rem_lines))
+
+    if not sections:
+        return ""
+    return f"\n{_divider()}\n".join(sections)
 
 
 # ---------------------------------------------------------------------------
-# /delete
+# Datetime window helpers
 # ---------------------------------------------------------------------------
+
+def _is_future(iso_str: str, now: datetime) -> bool:
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt >= now
+    except (ValueError, TypeError):
+        return True
+
+
+def _in_window(iso_str: str, now: datetime, cutoff: datetime) -> bool:
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return now <= dt <= cutoff
+    except (ValueError, TypeError):
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Command / callback handlers
+# ---------------------------------------------------------------------------
+
+async def cmd_upcoming(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = await build_upcoming_message(days=7)
+    await _reply(update, text or "No events in the next 7 days.", keyboard=_back_keyboard())
+
+
+async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = await build_upcoming_message(days=0)
+    await _reply(update, text or "Nothing scheduled for today.", keyboard=_back_keyboard())
+
+
+async def cmd_cs2(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _reply(update, await _build_cs2_text(), keyboard=_back_keyboard())
+
+
+async def cmd_f1(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _reply(update, await _build_f1_text(), keyboard=_back_keyboard())
+
+
+async def cmd_music(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _reply(update, await _build_music_text(), keyboard=_back_keyboard())
+
+
+async def cmd_birthdays(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _reply(update, await _build_birthdays_text(), keyboard=_back_keyboard())
+
+
+async def cmd_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _reply(update, await _build_reminders_text(), keyboard=_back_keyboard())
+
 
 async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
-        await update.message.reply_text(
-            "Usage: /delete <id>\n"
-            "Use /birthdays or /reminders to find the ID."
+        await _reply(
+            update,
+            "Usage: /delete &lt;id&gt;\n"
+            "Use /birthdays or /reminders to find the ID.",
+            keyboard=_back_keyboard(),
         )
         return
 
     try:
         item_id = int(context.args[0])
     except ValueError:
-        await update.message.reply_text("ID must be an integer.")
+        await _reply(update, "ID must be an integer.", keyboard=_back_keyboard())
         return
 
-    # Try deleting from reminders first, then birthdays
-    deleted = await db.delete_reminder(config.DB_PATH, item_id)
-    if deleted:
-        await update.message.reply_text(f"Reminder [{item_id}] deleted.")
+    if await db.delete_reminder(config.DB_PATH, item_id):
+        await _reply(update, f"Reminder [{item_id}] deleted.", keyboard=_back_keyboard())
+        return
+    if await db.delete_birthday(config.DB_PATH, item_id):
+        await _reply(update, f"Birthday [{item_id}] deleted.", keyboard=_back_keyboard())
         return
 
-    deleted = await db.delete_birthday(config.DB_PATH, item_id)
-    if deleted:
-        await update.message.reply_text(f"Birthday [{item_id}] deleted.")
-        return
+    await _reply(update, f"No item with ID {item_id} found.", keyboard=_back_keyboard())
 
-    await update.message.reply_text(
-        f"No reminder or birthday with ID {item_id} found."
-    )
-
-
-# ---------------------------------------------------------------------------
-# /refresh
-# ---------------------------------------------------------------------------
 
 async def cmd_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("Refreshing data... please wait.")
+    # Acknowledge immediately, then edit with results when done
+    await _reply(update, "Refreshing data, please wait...")
 
     from src.scrapers.hltv import scrape_navi_matches
     from src.scrapers.f1 import fetch_f1_races
@@ -476,19 +441,17 @@ async def cmd_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     results: list[str] = []
 
-    # CS2
     try:
         events = await scrape_navi_matches()
         if events:
             await db_module.upsert_cache_events(config.DB_PATH, "cs2", events)
             results.append(f"CS2: {len(events)} matches cached")
         else:
-            results.append("CS2: data unavailable — try again later")
-    except Exception as exc:  # noqa: BLE001
+            results.append("CS2: data unavailable (HLTV may be blocking)")
+    except Exception as exc:
         logger.error("CS2 refresh error: %s", exc)
         results.append("CS2: refresh failed")
 
-    # F1
     try:
         events = await fetch_f1_races()
         if events:
@@ -496,11 +459,10 @@ async def cmd_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             results.append(f"F1: {len(events)} races cached")
         else:
             results.append("F1: no upcoming races found")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.error("F1 refresh error: %s", exc)
         results.append("F1: refresh failed")
 
-    # Hajime
     try:
         events = await fetch_hajime_releases(config.HAJIME_CHANNEL_ID)
         if events:
@@ -508,9 +470,14 @@ async def cmd_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             results.append(f"Music: {len(events)} releases cached")
         else:
             results.append("Music: no releases found")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.error("Hajime refresh error: %s", exc)
         results.append("Music: refresh failed")
 
-    summary = "*Refresh complete:*\n" + "\n".join(f"- {r}" for r in results)
-    await update.message.reply_text(summary, parse_mode="Markdown")
+    summary = "<b>Refresh complete:</b>\n" + "\n".join(f"- {_e(r)}" for r in results)
+
+    query = update.callback_query
+    if query:
+        await query.edit_message_text(summary, parse_mode=ParseMode.HTML, reply_markup=_back_keyboard())
+    else:
+        await update.message.reply_text(summary, parse_mode=ParseMode.HTML, reply_markup=_back_keyboard())

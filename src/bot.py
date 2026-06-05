@@ -6,25 +6,23 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ConversationHandler
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler
 
 from src import config
 from src.database import init_db
 from src.handlers.commands import (
-    cmd_start,
-    cmd_upcoming,
-    cmd_today,
+    cmd_birthdays,
     cmd_cs2,
+    cmd_delete,
     cmd_f1,
     cmd_music,
-    cmd_birthdays,
-    cmd_reminders,
-    cmd_delete,
     cmd_refresh,
+    cmd_reminders,
+    cmd_start,
+    cmd_today,
+    cmd_upcoming,
 )
-from src.handlers.conversations import (
-    add_conversation_handler,
-)
+from src.handlers.conversations import add_conversation_handler
 from src.scheduler import setup_scheduler
 
 logger = logging.getLogger(__name__)
@@ -57,7 +55,7 @@ def build_application() -> Application:
         .build()
     )
 
-    # Command handlers
+    # Slash commands
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("upcoming", cmd_upcoming))
     app.add_handler(CommandHandler("today", cmd_today))
@@ -69,7 +67,23 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("delete", cmd_delete))
     app.add_handler(CommandHandler("refresh", cmd_refresh))
 
-    # Conversation handler for /add
+    # Inline button navigation (must be registered before ConversationHandler
+    # so they are reachable when no conversation is active)
+    _NAV = {
+        "menu": cmd_start,
+        "upcoming": cmd_upcoming,
+        "today": cmd_today,
+        "cs2": cmd_cs2,
+        "f1": cmd_f1,
+        "music": cmd_music,
+        "birthdays": cmd_birthdays,
+        "reminders": cmd_reminders,
+        "refresh": cmd_refresh,
+    }
+    for pattern, handler in _NAV.items():
+        app.add_handler(CallbackQueryHandler(handler, pattern=f"^{pattern}$"))
+
+    # Conversation handler for /add and the "+ Add" button
     app.add_handler(add_conversation_handler())
 
     return app
