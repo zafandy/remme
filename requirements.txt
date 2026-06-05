@@ -8,3 +8,4 @@ lxml>=5.0
 feedparser>=6.0
 python-dateutil>=2.9
 pytz>=2024.1
+cloudscraper>=1.2

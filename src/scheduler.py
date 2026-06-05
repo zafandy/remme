@@ -1,6 +1,8 @@
 """APScheduler jobs for the remme bot."""
 
+import html
 import logging
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
@@ -22,186 +24,314 @@ def _tz():
 
 
 # ---------------------------------------------------------------------------
-# Job: daily digest
+# Helpers
 # ---------------------------------------------------------------------------
 
-async def _send_daily_digest(app: "Application") -> None:
-    """Send today's events plus anything due in the next 3 days."""
-    from src.handlers.commands import build_upcoming_message
+def _e(text: str) -> str:
+    return html.escape(str(text))
 
+
+def _fmt_time(iso_str: str | None, tz) -> str:
+    if not iso_str:
+        return "TBD"
     try:
-        text = await build_upcoming_message(days=3, include_past_today=True)
-        if text.strip():
-            await app.bot.send_message(
-                chat_id=config.TELEGRAM_CHAT_ID,
-                text=text,
-                parse_mode="Markdown",
-            )
-            logger.info("Daily digest sent")
-        else:
-            await app.bot.send_message(
-                chat_id=config.TELEGRAM_CHAT_ID,
-                text="No events coming up in the next 3 days.",
-                parse_mode="Markdown",
-            )
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Daily digest failed: %s", exc)
+        dt = datetime.fromisoformat(iso_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(tz).strftime("%H:%M")
+    except (ValueError, TypeError):
+        return iso_str
+
+
+def _fmt_dt(iso_str: str | None, tz) -> str:
+    if not iso_str:
+        return "TBD"
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(tz).strftime("%a, %d %b at %H:%M")
+    except (ValueError, TypeError):
+        return iso_str
+
+
+def _is_today(iso_str: str, tz, today) -> bool:
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(tz).date() == today
+    except (ValueError, TypeError):
+        return False
 
 
 # ---------------------------------------------------------------------------
-# Job: reminder check (every 15 minutes)
+# Job 1: Morning digest + birthday alerts at 07:00
+# ---------------------------------------------------------------------------
+
+async def _morning_digest(app: "Application") -> None:
+    try:
+        tz = _tz()
+        now = datetime.now(timezone.utc)
+        today_local = datetime.now(tz).date()
+
+        parts: list[str] = [
+            f"<b>Good morning — {today_local.strftime('%A, %d %b %Y')}</b>"
+        ]
+        sections: list[str] = []
+
+        # CS2 today
+        cs2_today = [
+            ev for ev in await db.get_cache_events(config.DB_PATH, "cs2")
+            if ev.get("event_at") and _is_today(ev["event_at"], tz, today_local)
+        ]
+        if cs2_today:
+            lines = ["<b>[ CS2 ]</b>"]
+            for ev in cs2_today:
+                desc = f" [{_e(ev['description'])}]" if ev.get("description") else ""
+                lines.append(f"- {_e(ev['title'])}{desc}\n  {_fmt_time(ev['event_at'], tz)}")
+            sections.append("\n".join(lines))
+
+        # F1 today — grouped by GP
+        f1_today = [
+            ev for ev in await db.get_cache_events(config.DB_PATH, "f1")
+            if ev.get("event_at") and _is_today(ev["event_at"], tz, today_local)
+        ]
+        if f1_today:
+            gp_groups: dict[str, list] = defaultdict(list)
+            for ev in f1_today:
+                gp_groups[ev.get("description") or "F1"].append(ev)
+            lines = ["<b>[ FORMULA 1 ]</b>"]
+            for gp_name, sessions in gp_groups.items():
+                lines.append(f"<b>{_e(gp_name)}</b>")
+                for s in sessions:
+                    title = s.get("title", "")
+                    session_label = title.split(" — ", 1)[1] if " — " in title else title
+                    lines.append(f"  {_e(session_label)}: {_fmt_time(s['event_at'], tz)}")
+            sections.append("\n".join(lines))
+
+        # Barcelona today
+        barca_today = [
+            ev for ev in await db.get_cache_events(config.DB_PATH, "barcelona")
+            if ev.get("event_at") and _is_today(ev["event_at"], tz, today_local)
+        ]
+        if barca_today:
+            lines = ["<b>[ BARCELONA ]</b>"]
+            for ev in barca_today:
+                desc = f" [{_e(ev['description'])}]" if ev.get("description") else ""
+                lines.append(f"- {_e(ev['title'])}{desc}\n  {_fmt_time(ev['event_at'], tz)}")
+            sections.append("\n".join(lines))
+
+        # Reminders today
+        rems_today = [
+            r for r in await db.get_active_reminders(config.DB_PATH)
+            if r.get("remind_at") and _is_today(r["remind_at"], tz, today_local)
+        ]
+        if rems_today:
+            lines = ["<b>[ REMINDERS ]</b>"]
+            for rem in rems_today:
+                line = f"- {_e(rem['title'])}\n  {_fmt_time(rem['remind_at'], tz)}"
+                if rem.get("notes"):
+                    line += f"\n  <i>{_e(rem['notes'])}</i>"
+                lines.append(line)
+            sections.append("\n".join(lines))
+
+        if sections:
+            divider = "\n" + "─" * 28 + "\n"
+            parts.append("\n\nToday's schedule:\n" + divider.join(sections))
+        else:
+            parts.append("\n\nNothing scheduled for today.")
+
+        # Birthday alerts (today + 3 days)
+        bday_alerts = await _build_birthday_alerts(today_local)
+        if bday_alerts:
+            parts.append("\n\n<b>[ BIRTHDAYS ]</b>\n" + "\n".join(bday_alerts))
+
+        text = "".join(parts)
+        await app.bot.send_message(
+            chat_id=config.TELEGRAM_CHAT_ID,
+            text=text,
+            parse_mode="HTML",
+        )
+        logger.info("Morning digest sent")
+
+    except Exception as exc:
+        logger.error("Morning digest failed: %s", exc)
+
+
+async def _build_birthday_alerts(today) -> list[str]:
+    alerts: list[str] = []
+    for bday in await db.get_birthdays(config.DB_PATH):
+        month, day = bday["month"], bday["day"]
+        name = bday["name"]
+        notes = bday.get("notes") or ""
+        try:
+            this_year = today.replace(month=month, day=day)
+            delta = (this_year - today).days
+            if delta < 0:
+                this_year = this_year.replace(year=today.year + 1)
+                delta = (this_year - today).days
+        except ValueError:
+            continue
+        if delta == 0:
+            msg = f"Today is <b>{_e(name)}</b>'s birthday!"
+            if notes:
+                msg += f" <i>{_e(notes)}</i>"
+            alerts.append(msg)
+        elif delta == 3:
+            msg = f"<b>{_e(name)}</b>'s birthday in 3 days ({this_year.strftime('%d %b')})"
+            if notes:
+                msg += f" — <i>{_e(notes)}</i>"
+            alerts.append(msg)
+    return alerts
+
+
+# ---------------------------------------------------------------------------
+# Job 2: Event alerts every 5 minutes (1h before + at start for CS2/F1/Barcelona)
+# ---------------------------------------------------------------------------
+
+_ALERT_CATEGORIES = ("cs2", "f1", "barcelona")
+
+
+async def _event_alerts(app: "Application") -> None:
+    try:
+        now = datetime.now(timezone.utc)
+
+        for category in _ALERT_CATEGORIES:
+            events = await db.get_cache_events(config.DB_PATH, category)
+            for ev in events:
+                ext_id = ev.get("external_id")
+                event_at = ev.get("event_at")
+                if not ext_id or not event_at:
+                    continue
+
+                try:
+                    dt = datetime.fromisoformat(event_at)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                except ValueError:
+                    continue
+
+                minutes_until = (dt - now).total_seconds() / 60
+
+                # 1 hour before: fire when 50–70 min away
+                if 50 <= minutes_until <= 70:
+                    if not await db.has_notification_sent(config.DB_PATH, ext_id, "1h_before"):
+                        await _send_event_alert(app, ev, "1h_before")
+                        await db.mark_notification_sent(config.DB_PATH, ext_id, "1h_before")
+
+                # At start: fire when -5 to +10 min from start
+                if -5 <= minutes_until <= 10:
+                    if not await db.has_notification_sent(config.DB_PATH, ext_id, "start"):
+                        await _send_event_alert(app, ev, "start")
+                        await db.mark_notification_sent(config.DB_PATH, ext_id, "start")
+
+    except Exception as exc:
+        logger.error("Event alerts job failed: %s", exc)
+
+
+async def _send_event_alert(app: "Application", ev: dict, notif_type: str) -> None:
+    tz = _tz()
+    title = _e(ev.get("title", "Unknown event"))
+    desc = ev.get("description") or ""
+    date_str = _fmt_dt(ev.get("event_at"), tz)
+
+    if notif_type == "1h_before":
+        header = f"Starts in 1 hour: <b>{title}</b>"
+    else:
+        header = f"Starting now: <b>{title}</b>"
+
+    lines = [header, date_str]
+    if desc:
+        lines.append(_e(desc))
+
+    await app.bot.send_message(
+        chat_id=config.TELEGRAM_CHAT_ID,
+        text="\n".join(lines),
+        parse_mode="HTML",
+    )
+    logger.info("Event alert (%s) sent for: %s", notif_type, ev.get("title"))
+
+
+# ---------------------------------------------------------------------------
+# Job 3: Reminder check every 5 minutes
 # ---------------------------------------------------------------------------
 
 async def _check_reminders(app: "Application") -> None:
-    """Fire reminders whose remind_at falls within the next 15 minutes."""
     try:
         now = datetime.now(timezone.utc)
-        window_end = now + timedelta(minutes=15)
+        window_end = now + timedelta(minutes=5)
 
-        reminders = await db.get_active_reminders(config.DB_PATH)
-        for reminder in reminders:
+        for reminder in await db.get_active_reminders(config.DB_PATH):
             try:
-                remind_at_str = reminder["remind_at"]
-                remind_dt = datetime.fromisoformat(remind_at_str)
+                remind_dt = datetime.fromisoformat(reminder["remind_at"])
                 if remind_dt.tzinfo is None:
                     remind_dt = remind_dt.replace(tzinfo=timezone.utc)
 
                 if now <= remind_dt <= window_end:
-                    text = _format_reminder_alert(reminder)
-                    await app.bot.send_message(
-                        chat_id=config.TELEGRAM_CHAT_ID,
-                        text=text,
-                        parse_mode="Markdown",
-                    )
-                    logger.info("Fired reminder id=%s: %s", reminder["id"], reminder["title"])
+                    await _send_reminder_alert(app, reminder)
 
                     recurring = reminder.get("recurring")
                     if recurring:
                         await db.advance_recurring_reminder(
-                            config.DB_PATH,
-                            reminder["id"],
-                            recurring,
-                            remind_at_str,
+                            config.DB_PATH, reminder["id"], recurring, reminder["remind_at"]
                         )
                     else:
                         await db.deactivate_reminder(config.DB_PATH, reminder["id"])
 
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.error("Error processing reminder id=%s: %s", reminder.get("id"), exc)
 
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.error("Reminder check job failed: %s", exc)
 
 
-def _format_reminder_alert(reminder: dict) -> str:
-    title = reminder["title"]
+async def _send_reminder_alert(app: "Application", reminder: dict) -> None:
+    title = _e(reminder["title"])
     notes = reminder.get("notes") or ""
     recurring = reminder.get("recurring")
 
-    lines = [f"*Reminder:* {title}"]
+    lines = [f"<b>Reminder:</b> {title}"]
     if notes:
-        lines.append(f"_{notes}_")
+        lines.append(f"<i>{_e(notes)}</i>")
     if recurring:
-        lines.append(f"_(Recurring: {recurring})_")
-    return "\n".join(lines)
+        lines.append(f"<i>(Recurring: {recurring})</i>")
+
+    await app.bot.send_message(
+        chat_id=config.TELEGRAM_CHAT_ID,
+        text="\n".join(lines),
+        parse_mode="HTML",
+    )
+    logger.info("Fired reminder id=%s: %s", reminder["id"], reminder["title"])
 
 
 # ---------------------------------------------------------------------------
-# Job: birthday check (every day at 08:00)
-# ---------------------------------------------------------------------------
-
-async def _check_birthdays(app: "Application") -> None:
-    """Alert if any birthday is today or in exactly 3 days."""
-    try:
-        today_local = datetime.now(_tz()).date()
-        birthdays = await db.get_birthdays(config.DB_PATH)
-
-        alerts: list[str] = []
-        for bday in birthdays:
-            month = bday["month"]
-            day = bday["day"]
-            name = bday["name"]
-            notes = bday.get("notes") or ""
-
-            try:
-                this_year = today_local.replace(month=month, day=day)
-            except ValueError:
-                continue  # e.g. Feb 29
-
-            # Calculate days until birthday this year
-            delta = (this_year - today_local).days
-            if delta < 0:
-                # Birthday already passed this year; compute for next year
-                try:
-                    next_year_bday = this_year.replace(year=today_local.year + 1)
-                    delta = (next_year_bday - today_local).days
-                except ValueError:
-                    continue
-
-            if delta == 0:
-                msg = f"Today is *{name}*'s birthday!"
-                if notes:
-                    msg += f" _{notes}_"
-                alerts.append(msg)
-            elif delta == 3:
-                msg = f"*{name}*'s birthday is in 3 days ({this_year.strftime('%d %b')})."
-                if notes:
-                    msg += f" _{notes}_"
-                alerts.append(msg)
-
-        if alerts:
-            header = "*Birthday Alert*\n\n"
-            text = header + "\n".join(alerts)
-            await app.bot.send_message(
-                chat_id=config.TELEGRAM_CHAT_ID,
-                text=text,
-                parse_mode="Markdown",
-            )
-            logger.info("Birthday alerts sent: %d", len(alerts))
-
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Birthday check job failed: %s", exc)
-
-
-# ---------------------------------------------------------------------------
-# Job: data refresh (every 6 hours)
+# Job 4: Data refresh every 6 hours
 # ---------------------------------------------------------------------------
 
 async def _refresh_data(app: "Application") -> None:
-    """Refresh HLTV, F1, and Hajime caches."""
     from src.scrapers.hltv import scrape_navi_matches
     from src.scrapers.f1 import fetch_f1_races
     from src.scrapers.hajime import fetch_hajime_releases
+    from src.scrapers.barcelona import fetch_barcelona_matches
 
     logger.info("Starting scheduled data refresh...")
 
-    # CS2 / HLTV
-    try:
-        cs2_events = await scrape_navi_matches()
-        if cs2_events:
-            await db.upsert_cache_events(config.DB_PATH, "cs2", cs2_events)
-            logger.info("CS2 cache refreshed: %d events", len(cs2_events))
-    except Exception as exc:  # noqa: BLE001
-        logger.error("CS2 refresh failed: %s", exc)
+    for label, coro, category in [
+        ("CS2", scrape_navi_matches(), "cs2"),
+        ("F1", fetch_f1_races(), "f1"),
+        ("Hajime", fetch_hajime_releases(config.HAJIME_CHANNEL_ID), "hajime"),
+        ("Barcelona", fetch_barcelona_matches(config.BARCELONA_TEAM_ID), "barcelona"),
+    ]:
+        try:
+            events = await coro
+            if events:
+                await db.upsert_cache_events(config.DB_PATH, category, events)
+                logger.info("%s cache refreshed: %d events", label, len(events))
+        except Exception as exc:
+            logger.error("%s refresh failed: %s", label, exc)
 
-    # F1
-    try:
-        f1_events = await fetch_f1_races()
-        if f1_events:
-            await db.upsert_cache_events(config.DB_PATH, "f1", f1_events)
-            logger.info("F1 cache refreshed: %d events", len(f1_events))
-    except Exception as exc:  # noqa: BLE001
-        logger.error("F1 refresh failed: %s", exc)
-
-    # Hajime
-    try:
-        hajime_events = await fetch_hajime_releases(config.HAJIME_CHANNEL_ID)
-        if hajime_events:
-            await db.upsert_cache_events(config.DB_PATH, "hajime", hajime_events)
-            logger.info("Hajime cache refreshed: %d events", len(hajime_events))
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Hajime refresh failed: %s", exc)
-
+    await db.cleanup_old_notifications(config.DB_PATH)
     logger.info("Scheduled data refresh complete")
 
 
@@ -212,34 +342,30 @@ async def _refresh_data(app: "Application") -> None:
 def setup_scheduler(app: "Application") -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone=_tz())
 
-    # Daily digest at 09:00 local time
     scheduler.add_job(
-        _send_daily_digest,
-        CronTrigger(hour=9, minute=0, timezone=_tz()),
+        _morning_digest,
+        CronTrigger(hour=7, minute=0, timezone=_tz()),
         args=[app],
-        id="daily_digest",
+        id="morning_digest",
         replace_existing=True,
     )
 
-    # Reminder check every 15 minutes
+    scheduler.add_job(
+        _event_alerts,
+        IntervalTrigger(minutes=5),
+        args=[app],
+        id="event_alerts",
+        replace_existing=True,
+    )
+
     scheduler.add_job(
         _check_reminders,
-        IntervalTrigger(minutes=15),
+        IntervalTrigger(minutes=5),
         args=[app],
         id="reminder_check",
         replace_existing=True,
     )
 
-    # Birthday check at 08:00 local time
-    scheduler.add_job(
-        _check_birthdays,
-        CronTrigger(hour=8, minute=0, timezone=_tz()),
-        args=[app],
-        id="birthday_check",
-        replace_existing=True,
-    )
-
-    # Data refresh every 6 hours
     scheduler.add_job(
         _refresh_data,
         IntervalTrigger(hours=6),

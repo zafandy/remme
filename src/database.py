@@ -41,6 +41,14 @@ CREATE TABLE IF NOT EXISTS event_cache (
     external_id TEXT    UNIQUE,
     fetched_at  TEXT    NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS notification_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    external_id TEXT    NOT NULL,
+    notif_type  TEXT    NOT NULL,    -- '1h_before' | 'start'
+    sent_at     TEXT    NOT NULL,
+    UNIQUE(external_id, notif_type)
+);
 """
 
 
@@ -213,3 +221,35 @@ async def get_cache_events(
         ) as cur:
             rows = await cur.fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Notification log
+# ---------------------------------------------------------------------------
+
+async def has_notification_sent(db_path: str, external_id: str, notif_type: str) -> bool:
+    async with aiosqlite.connect(db_path) as db:
+        async with db.execute(
+            "SELECT 1 FROM notification_log WHERE external_id = ? AND notif_type = ?",
+            (external_id, notif_type),
+        ) as cur:
+            return await cur.fetchone() is not None
+
+
+async def mark_notification_sent(db_path: str, external_id: str, notif_type: str) -> None:
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            """INSERT OR IGNORE INTO notification_log (external_id, notif_type, sent_at)
+               VALUES (?, ?, ?)""",
+            (external_id, notif_type, _now_iso()),
+        )
+        await db.commit()
+
+
+async def cleanup_old_notifications(db_path: str, days: int = 30) -> None:
+    """Remove notification log entries older than `days` days."""
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("DELETE FROM notification_log WHERE sent_at < ?", (cutoff,))
+        await db.commit()

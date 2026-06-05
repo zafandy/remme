@@ -11,6 +11,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler
 from src import config
 from src.database import init_db
 from src.handlers.commands import (
+    cmd_barcelona,
     cmd_birthdays,
     cmd_cs2,
     cmd_delete,
@@ -66,6 +67,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("reminders", cmd_reminders))
     app.add_handler(CommandHandler("delete", cmd_delete))
     app.add_handler(CommandHandler("refresh", cmd_refresh))
+    app.add_handler(CommandHandler("barcelona", cmd_barcelona))
 
     # Inline button navigation (must be registered before ConversationHandler
     # so they are reachable when no conversation is active)
@@ -76,6 +78,7 @@ def build_application() -> Application:
         "cs2": cmd_cs2,
         "f1": cmd_f1,
         "music": cmd_music,
+        "barcelona": cmd_barcelona,
         "birthdays": cmd_birthdays,
         "reminders": cmd_reminders,
         "refresh": cmd_refresh,

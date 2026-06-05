@@ -67,10 +67,11 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("Birthdays", callback_data="birthdays"),
         ],
         [
+            InlineKeyboardButton("Barcelona", callback_data="barcelona"),
             InlineKeyboardButton("Reminders", callback_data="reminders"),
-            InlineKeyboardButton("Refresh data", callback_data="refresh"),
         ],
         [
+            InlineKeyboardButton("Refresh data", callback_data="refresh"),
             InlineKeyboardButton("+ Add", callback_data="add_item"),
         ],
     ])
@@ -146,30 +147,39 @@ async def _build_cs2_text() -> str:
 
 
 async def _build_f1_text() -> str:
+    from collections import defaultdict
     tz = config.TIMEZONE
     events = await db.get_cache_events(config.DB_PATH, "f1")
     now = datetime.now(timezone.utc)
 
-    upcoming = [
-        ev for ev in events
-        if not ev.get("event_at") or _is_future(ev["event_at"], now)
-    ][:5]
+    upcoming = sorted(
+        [ev for ev in events if _is_future(ev.get("event_at", ""), now)],
+        key=lambda e: e.get("event_at") or "",
+    )
 
     if not upcoming:
-        return "No upcoming F1 races cached.\nTap <b>Refresh data</b> to update."
+        return "No upcoming F1 sessions cached.\nTap <b>Refresh data</b> to update."
 
-    lines = [_h("FORMULA 1") + " — next races\n"]
+    # Group by GP name (stored in description)
+    groups: dict[str, list] = defaultdict(list)
     for ev in upcoming:
-        title = _e(ev.get("title", "Unknown race"))
-        desc = _e(ev.get("description") or "")
-        date_str = _e(_fmt_dt(ev.get("event_at"), tz))
-        line = f"- <b>{title}</b>"
-        if desc:
-            line += f"\n  {desc}"
-        line += f"\n  {date_str}"
-        lines.append(line)
+        gp = ev.get("description") or "Unknown GP"
+        groups[gp].append(ev)
 
-    return "\n\n".join(lines)
+    # Sort GPs by first session, show next 3 weekends
+    sorted_groups = sorted(groups.items(), key=lambda g: g[1][0].get("event_at") or "")[:3]
+
+    parts = [_h("FORMULA 1") + "\n"]
+    for gp_name, sessions in sorted_groups:
+        parts.append(f"<b>{_e(gp_name)}</b>")
+        for s in sessions:
+            title = s.get("title", "")
+            label = title.split(" — ", 1)[1] if " — " in title else title
+            date_str = _e(_fmt_dt(s.get("event_at"), tz))
+            parts.append(f"  {_e(label)}: {date_str}")
+        parts.append("")
+
+    return "\n".join(parts).rstrip()
 
 
 async def _build_music_text() -> str:
@@ -255,11 +265,45 @@ async def _build_reminders_text() -> str:
     return "\n\n".join(lines)
 
 
+async def _build_barcelona_text() -> str:
+    tz = config.TIMEZONE
+    events = await db.get_cache_events(config.DB_PATH, "barcelona")
+    now = datetime.now(timezone.utc)
+
+    upcoming = sorted(
+        [ev for ev in events if _is_future(ev.get("event_at", ""), now)],
+        key=lambda e: e.get("event_at") or "",
+    )[:5]
+
+    if not upcoming:
+        return "No upcoming Barcelona matches cached.\nTap <b>Refresh data</b> to update."
+
+    lines = [_h("BARCELONA") + " — FC Barcelona upcoming matches\n"]
+    for ev in upcoming:
+        title = _e(ev.get("title", "Unknown match"))
+        desc = _e(ev.get("description") or "")
+        date_str = _e(_fmt_dt(ev.get("event_at"), tz))
+        line = f"- <b>{title}</b>"
+        if desc:
+            line += f"\n  {desc}"
+        line += f"\n  {date_str}"
+        lines.append(line)
+
+    return "\n\n".join(lines)
+
+
 async def build_upcoming_message(days: int = 7) -> str:
     tz = config.TIMEZONE
     now = datetime.now(timezone.utc)
     now_local = datetime.now(tz)
-    cutoff = now + timedelta(days=days)
+    if days == 0:
+        # End of today in local timezone
+        tomorrow = (now_local + timedelta(days=1)).date()
+        cutoff = tz.localize(
+            datetime(tomorrow.year, tomorrow.month, tomorrow.day, 0, 0)
+        ).astimezone(timezone.utc)
+    else:
+        cutoff = now + timedelta(days=days)
     sections: list[str] = []
 
     # CS2
@@ -292,6 +336,22 @@ async def build_upcoming_message(days: int = 7) -> str:
         f1_lines.append(line)
     if f1_lines:
         sections.append(_h("FORMULA 1") + "\n" + "\n\n".join(f1_lines))
+
+    # Barcelona
+    barca_lines: list[str] = []
+    for ev in await db.get_cache_events(config.DB_PATH, "barcelona"):
+        if ev.get("event_at") and not _in_window(ev["event_at"], now, cutoff):
+            continue
+        title = _e(ev.get("title", "Unknown match"))
+        desc = _e(ev.get("description") or "")
+        date_str = _e(_fmt_dt(ev.get("event_at"), tz))
+        line = f"- {title}"
+        if desc:
+            line += f" ({desc})"
+        line += f"\n  {date_str}"
+        barca_lines.append(line)
+    if barca_lines:
+        sections.append(_h("BARCELONA") + "\n" + "\n\n".join(barca_lines))
 
     # Birthdays
     today_local = now_local.date()
@@ -396,6 +456,10 @@ async def cmd_music(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _reply(update, await _build_music_text(), keyboard=_back_keyboard())
 
 
+async def cmd_barcelona(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _reply(update, await _build_barcelona_text(), keyboard=_back_keyboard())
+
+
 async def cmd_birthdays(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _reply(update, await _build_birthdays_text(), keyboard=_back_keyboard())
 
@@ -473,6 +537,19 @@ async def cmd_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except Exception as exc:
         logger.error("Hajime refresh error: %s", exc)
         results.append("Music: refresh failed")
+
+    # Barcelona
+    try:
+        from src.scrapers.barcelona import fetch_barcelona_matches
+        events = await fetch_barcelona_matches(config.BARCELONA_TEAM_ID)
+        if events:
+            await db_module.upsert_cache_events(config.DB_PATH, "barcelona", events)
+            results.append(f"Barcelona: {len(events)} matches cached")
+        else:
+            results.append("Barcelona: no upcoming matches found")
+    except Exception as exc:
+        logger.error("Barcelona refresh error: %s", exc)
+        results.append("Barcelona: refresh failed")
 
     summary = "<b>Refresh complete:</b>\n" + "\n".join(f"- {_e(r)}" for r in results)
 
