@@ -1,72 +1,111 @@
-"""OpenF1 API scraper — returns each session of each Grand Prix weekend as a separate event."""
+"""Jolpica F1 API scraper — extracts every session of each Grand Prix weekend.
+
+OpenF1 returned 401; Jolpica (the Ergast drop-in replacement) is free,
+no-auth, and includes FirstPractice, SecondPractice, ThirdPractice,
+SprintQualifying, Sprint, Qualifying, and Race per race weekend.
+"""
 
 import logging
-from datetime import datetime, timezone
-from typing import Any
+from datetime import date, datetime, timezone
+from typing import Any, Optional
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
-_OPENF1_URL = "https://api.openf1.org/v1/sessions"
+_JOLPICA_URL = "https://api.jolpi.ca/ergast/f1/{year}/races.json"
+
+# Ordered list of sub-session fields in a race entry and their display labels
+_SESSION_FIELDS: list[tuple[str, str]] = [
+    ("FirstPractice",    "Practice 1"),
+    ("SecondPractice",   "Practice 2"),
+    ("ThirdPractice",    "Practice 3"),
+    ("SprintQualifying", "Sprint Qualifying"),
+    ("Sprint",           "Sprint"),
+    ("Qualifying",       "Qualifying"),
+]
 
 
 async def fetch_f1_races() -> list[dict[str, Any]]:
-    year = datetime.now(timezone.utc).year
-    now = datetime.now(timezone.utc)
+    today = date.today()
+    years = [today.year]
+    if today.month >= 10:
+        years.append(today.year + 1)
 
+    now = datetime.now(timezone.utc)
     events: list[dict[str, Any]] = []
 
-    for yr in _years_to_fetch(year, now):
+    for year in years:
+        url = _JOLPICA_URL.format(year=year)
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.get(_OPENF1_URL, params={"year": yr})
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                resp = await client.get(url)
                 resp.raise_for_status()
-                sessions = resp.json()
+                data = resp.json()
         except Exception as exc:
-            logger.warning("OpenF1 API request for year %d failed: %s", yr, exc)
+            logger.warning("Jolpica F1 API for year %d failed: %s", year, exc)
             continue
 
-        for session in sessions:
-            ev = _session_to_event(session, now)
-            if ev:
-                events.append(ev)
+        races = data.get("MRData", {}).get("RaceTable", {}).get("Races", [])
+        for race in races:
+            events.extend(_extract_race_sessions(race, now))
 
     events.sort(key=lambda e: e.get("event_at") or "")
     logger.info("F1: found %d upcoming sessions", len(events))
     return events
 
 
-def _years_to_fetch(current_year: int, now: datetime) -> list[int]:
-    years = [current_year]
-    if now.month >= 10:
-        years.append(current_year + 1)
-    return years
+def _extract_race_sessions(race: dict, now: datetime) -> list[dict[str, Any]]:
+    gp_name = race.get("raceName", "Unknown GP")
+    season = race.get("season", "")
+    round_num = race.get("round", "0")
+    wiki_url = race.get("url")
+
+    sessions: list[dict[str, Any]] = []
+
+    for field, label in _SESSION_FIELDS:
+        sub = race.get(field)
+        if not sub:
+            continue
+        ev = _make_session(
+            gp_name, label,
+            sub.get("date", ""), sub.get("time", "00:00:00Z"),
+            season, round_num, field, wiki_url, now,
+        )
+        if ev:
+            sessions.append(ev)
+
+    # Race is at the top level of the race entry
+    race_ev = _make_session(
+        gp_name, "Race",
+        race.get("date", ""), race.get("time", "00:00:00Z"),
+        season, round_num, "Race", wiki_url, now,
+    )
+    if race_ev:
+        sessions.append(race_ev)
+
+    return sessions
 
 
-def _session_to_event(session: dict, now: datetime) -> dict[str, Any] | None:
-    date_start = session.get("date_start")
-    if not date_start:
+def _make_session(
+    gp_name: str, label: str,
+    date_str: str, time_str: str,
+    season: str, round_num: str, field_key: str,
+    url: Optional[str],
+    now: datetime,
+) -> Optional[dict[str, Any]]:
+    if not date_str:
         return None
-
     try:
-        dt = datetime.fromisoformat(date_start.replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+        dt = datetime.fromisoformat(f"{date_str}T{time_str.rstrip('Z')}+00:00")
     except ValueError:
         return None
-
     if dt < now:
         return None
-
-    meeting_name = session.get("meeting_name") or "Unknown GP"
-    session_name = session.get("session_name") or "Session"
-    session_key = session.get("session_key")
-
     return {
-        "title": f"{meeting_name} — {session_name}",
+        "title": f"{gp_name} — {label}",
         "event_at": dt.isoformat(),
-        "description": meeting_name,   # used for grouping sessions by GP in the display
-        "url": None,
-        "external_id": f"openf1_{session_key}",
+        "description": gp_name,          # used for display grouping
+        "url": url,
+        "external_id": f"f1_{season}_r{round_num}_{field_key.lower()}",
     }

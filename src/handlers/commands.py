@@ -55,24 +55,24 @@ def _h(label: str) -> str:
 def _main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("Upcoming (7 days)", callback_data="upcoming"),
-            InlineKeyboardButton("Today", callback_data="today"),
+            InlineKeyboardButton("📅 Upcoming (7 days)", callback_data="upcoming"),
+            InlineKeyboardButton("🗓 Today", callback_data="today"),
         ],
         [
-            InlineKeyboardButton("CS2", callback_data="cs2"),
-            InlineKeyboardButton("Formula 1", callback_data="f1"),
+            InlineKeyboardButton("🎮 CS2", callback_data="cs2"),
+            InlineKeyboardButton("🏎️ Formula 1", callback_data="f1"),
         ],
         [
-            InlineKeyboardButton("Music", callback_data="music"),
-            InlineKeyboardButton("Birthdays", callback_data="birthdays"),
+            InlineKeyboardButton("🎵 Music", callback_data="music"),
+            InlineKeyboardButton("🎂 Birthdays", callback_data="birthdays"),
         ],
         [
-            InlineKeyboardButton("Barcelona", callback_data="barcelona"),
-            InlineKeyboardButton("Reminders", callback_data="reminders"),
+            InlineKeyboardButton("⚽ Barcelona", callback_data="barcelona"),
+            InlineKeyboardButton("📌 Reminders", callback_data="reminders"),
         ],
         [
-            InlineKeyboardButton("Refresh data", callback_data="refresh"),
-            InlineKeyboardButton("+ Add", callback_data="add_item"),
+            InlineKeyboardButton("🔄 Refresh data", callback_data="refresh"),
+            InlineKeyboardButton("➕ Add", callback_data="add_item"),
         ],
     ])
 
@@ -105,7 +105,7 @@ async def _reply(
 # ---------------------------------------------------------------------------
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _reply(update, "<b>remme</b> — your personal reminder bot", keyboard=_main_menu_keyboard())
+    await _reply(update, "🔔 <b>remme</b> — your personal reminder bot", keyboard=_main_menu_keyboard())
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +133,7 @@ async def _build_cs2_text() -> str:
     if not upcoming:
         return "No upcoming NaVi matches cached.\nTap <b>Refresh data</b> to update."
 
-    lines = [_h("CS2") + " — NaVi upcoming matches\n"]
+    lines = [_h("🎮 CS2") + " — NaVi upcoming matches\n"]
     for ev in upcoming:
         title = _e(ev.get("title", "Unknown match"))
         date_str = _e(_fmt_dt(ev.get("event_at"), tz))
@@ -166,7 +166,7 @@ async def _build_f1_text() -> str:
 
     sorted_groups = sorted(groups.items(), key=lambda g: g[1][0].get("event_at") or "")[:5]
 
-    parts = [_h("FORMULA 1") + "\n"]
+    parts = [_h("🏎️ FORMULA 1") + "\n"]
     sep = "─" * 34
 
     for i, (gp_name, sessions) in enumerate(sorted_groups):
@@ -207,7 +207,7 @@ async def _build_music_text() -> str:
 
     sorted_events = sorted(events, key=lambda e: e.get("event_at") or "", reverse=True)[:5]
 
-    lines = [_h("MUSIC") + " — latest Hajime releases\n"]
+    lines = [_h("🎵 MUSIC") + " — latest Hajime releases\n"]
     for ev in sorted_events:
         title = _e(ev.get("title", "Unknown release"))
         date_str = _e(_fmt_dt(ev.get("event_at"), tz))
@@ -228,7 +228,7 @@ async def _build_birthdays_text() -> str:
     tz = config.TIMEZONE
     today_local = datetime.now(tz).date()
 
-    lines = [_h("BIRTHDAYS") + "\n"]
+    lines = [_h("🎂 BIRTHDAYS") + "\n"]
     for bday in birthdays:
         month, day = bday["month"], bday["day"]
         name = _e(bday["name"])
@@ -264,7 +264,7 @@ async def _build_reminders_text() -> str:
         return "No active reminders.\nTap <b>+ Add</b> to create one."
 
     tz = config.TIMEZONE
-    lines = [_h("REMINDERS") + "\n"]
+    lines = [_h("📌 REMINDERS") + "\n"]
     for rem in reminders:
         title = _e(rem["title"])
         notes = rem.get("notes") or ""
@@ -294,7 +294,7 @@ async def _build_barcelona_text() -> str:
     if not upcoming:
         return "No upcoming Barcelona matches cached.\nTap <b>Refresh data</b> to update."
 
-    lines = [_h("BARCELONA") + " — FC Barcelona upcoming matches\n"]
+    lines = [_h("⚽ BARCELONA") + " — FC Barcelona upcoming matches\n"]
     for ev in upcoming:
         title = _e(ev.get("title", "Unknown match"))
         desc = _e(ev.get("description") or "")
@@ -335,7 +335,7 @@ async def build_upcoming_message(days: int = 7) -> str:
             line += f"\n  {_e(url)}"
         cs2_lines.append(line)
     if cs2_lines:
-        sections.append(_h("CS2") + "\n" + "\n\n".join(cs2_lines))
+        sections.append(_h("🎮 CS2") + "\n" + "\n\n".join(cs2_lines))
 
     # F1
     f1_lines: list[str] = []
@@ -351,7 +351,7 @@ async def build_upcoming_message(days: int = 7) -> str:
         line += f"\n  {date_str}"
         f1_lines.append(line)
     if f1_lines:
-        sections.append(_h("FORMULA 1") + "\n" + "\n\n".join(f1_lines))
+        sections.append(_h("🏎️ FORMULA 1") + "\n" + "\n\n".join(f1_lines))
 
     # Barcelona
     barca_lines: list[str] = []
@@ -367,7 +367,7 @@ async def build_upcoming_message(days: int = 7) -> str:
         line += f"\n  {date_str}"
         barca_lines.append(line)
     if barca_lines:
-        sections.append(_h("BARCELONA") + "\n" + "\n\n".join(barca_lines))
+        sections.append(_h("⚽ BARCELONA") + "\n" + "\n\n".join(barca_lines))
 
     # Birthdays
     today_local = now_local.date()
@@ -391,7 +391,7 @@ async def build_upcoming_message(days: int = 7) -> str:
             line += f"\n  <i>{_e(notes)}</i>"
         bday_lines.append(line)
     if bday_lines:
-        sections.append(_h("BIRTHDAYS") + "\n" + "\n".join(bday_lines))
+        sections.append(_h("🎂 BIRTHDAYS") + "\n" + "\n".join(bday_lines))
 
     # Reminders
     rem_lines: list[str] = []
@@ -415,7 +415,7 @@ async def build_upcoming_message(days: int = 7) -> str:
             line += f"\n  <i>{_e(notes)}</i>"
         rem_lines.append(line)
     if rem_lines:
-        sections.append(_h("REMINDERS") + "\n" + "\n\n".join(rem_lines))
+        sections.append(_h("📌 REMINDERS") + "\n" + "\n\n".join(rem_lines))
 
     if not sections:
         return ""

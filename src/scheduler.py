@@ -76,7 +76,7 @@ async def _morning_digest(app: "Application") -> None:
         today_local = datetime.now(tz).date()
 
         parts: list[str] = [
-            f"<b>Good morning — {today_local.strftime('%A, %d %b %Y')}</b>"
+            f"☀️ <b>Good morning — {today_local.strftime('%A, %d %b %Y')}</b>"
         ]
         sections: list[str] = []
 
@@ -86,7 +86,7 @@ async def _morning_digest(app: "Application") -> None:
             if ev.get("event_at") and _is_today(ev["event_at"], tz, today_local)
         ]
         if cs2_today:
-            lines = ["<b>[ CS2 ]</b>"]
+            lines = ["🎮 <b>CS2</b>"]
             for ev in cs2_today:
                 desc = f" [{_e(ev['description'])}]" if ev.get("description") else ""
                 lines.append(f"- {_e(ev['title'])}{desc}\n  {_fmt_time(ev['event_at'], tz)}")
@@ -101,7 +101,7 @@ async def _morning_digest(app: "Application") -> None:
             gp_groups: dict[str, list] = defaultdict(list)
             for ev in f1_today:
                 gp_groups[ev.get("description") or "F1"].append(ev)
-            lines = ["<b>[ FORMULA 1 ]</b>"]
+            lines = ["🏎️ <b>FORMULA 1</b>"]
             for gp_name, sessions in gp_groups.items():
                 lines.append(f"<b>{_e(gp_name)}</b>")
                 for s in sessions:
@@ -116,7 +116,7 @@ async def _morning_digest(app: "Application") -> None:
             if ev.get("event_at") and _is_today(ev["event_at"], tz, today_local)
         ]
         if barca_today:
-            lines = ["<b>[ BARCELONA ]</b>"]
+            lines = ["⚽ <b>BARCELONA</b>"]
             for ev in barca_today:
                 desc = f" [{_e(ev['description'])}]" if ev.get("description") else ""
                 lines.append(f"- {_e(ev['title'])}{desc}\n  {_fmt_time(ev['event_at'], tz)}")
@@ -128,7 +128,7 @@ async def _morning_digest(app: "Application") -> None:
             if r.get("remind_at") and _is_today(r["remind_at"], tz, today_local)
         ]
         if rems_today:
-            lines = ["<b>[ REMINDERS ]</b>"]
+            lines = ["📌 <b>REMINDERS</b>"]
             for rem in rems_today:
                 line = f"- {_e(rem['title'])}\n  {_fmt_time(rem['remind_at'], tz)}"
                 if rem.get("notes"):
@@ -145,7 +145,7 @@ async def _morning_digest(app: "Application") -> None:
         # Birthday alerts (today + 3 days)
         bday_alerts = await _build_birthday_alerts(today_local)
         if bday_alerts:
-            parts.append("\n\n<b>[ BIRTHDAYS ]</b>\n" + "\n".join(bday_alerts))
+            parts.append("\n\n🎂 <b>BIRTHDAYS</b>\n" + "\n".join(bday_alerts))
 
         text = "".join(parts)
         await app.bot.send_message(
@@ -174,12 +174,12 @@ async def _build_birthday_alerts(today) -> list[str]:
         except ValueError:
             continue
         if delta == 0:
-            msg = f"Today is <b>{_e(name)}</b>'s birthday!"
+            msg = f"🎉 Today is <b>{_e(name)}</b>'s birthday!"
             if notes:
                 msg += f" <i>{_e(notes)}</i>"
             alerts.append(msg)
         elif delta == 3:
-            msg = f"<b>{_e(name)}</b>'s birthday in 3 days ({this_year.strftime('%d %b')})"
+            msg = f"🎂 <b>{_e(name)}</b>'s birthday in 3 days ({this_year.strftime('%d %b')})"
             if notes:
                 msg += f" — <i>{_e(notes)}</i>"
             alerts.append(msg)
@@ -237,9 +237,9 @@ async def _send_event_alert(app: "Application", ev: dict, notif_type: str) -> No
     date_str = _fmt_dt(ev.get("event_at"), tz)
 
     if notif_type == "1h_before":
-        header = f"Starts in 1 hour: <b>{title}</b>"
+        header = f"⏰ Starts in 1 hour: <b>{title}</b>"
     else:
-        header = f"Starting now: <b>{title}</b>"
+        header = f"🔔 Starting now: <b>{title}</b>"
 
     lines = [header, date_str]
     if desc:
@@ -291,7 +291,7 @@ async def _send_reminder_alert(app: "Application", reminder: dict) -> None:
     notes = reminder.get("notes") or ""
     recurring = reminder.get("recurring")
 
-    lines = [f"<b>Reminder:</b> {title}"]
+    lines = [f"📌 <b>Reminder:</b> {title}"]
     if notes:
         lines.append(f"<i>{_e(notes)}</i>")
     if recurring:
